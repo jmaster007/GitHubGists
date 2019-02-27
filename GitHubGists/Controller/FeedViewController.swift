@@ -9,36 +9,40 @@
 import UIKit
 import Foundation
 
-class ViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UITableViewDataSourcePrefetching, GistDelegate {
-
+class FeedViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UITableViewDataSourcePrefetching, FeedDelegate {
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        // Upload initial data
+        DispatchQueue(label: "Initial updateFeed").async {
+            Feed.updateFeed(delegate: self)
+        }
+        self.feedTableView.addSubview(self.refreshControl)
+    }
+    
+    // MARK - TableView
+    
+    @IBOutlet weak var feedTableView: UITableView!
+    
     var isLocked = false
+    
     var refreshControl: UIRefreshControl = {
         let refreshControl = UIRefreshControl()
         refreshControl.addTarget(self, action:
-            #selector(ViewController.handleRefresh(_:)),
+            #selector(FeedViewController.handleRefresh(_:)),
                                  for: .valueChanged)
         return refreshControl
     }()
     
     @objc func handleRefresh(_ refreshControl: UIRefreshControl) {
-        Gist.updateFeed(delegate: self)
-    }
-    
-    @IBOutlet weak var feedTableView: UITableView!
-    
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        // Upload initial data
-        DispatchQueue(label: "Initial feed update").async {
-            Gist.updateFeed(delegate: self)
+        // Refreshing at Pull-to-refresh action
+        DispatchQueue(label: "updateFeed").async {
+            Feed.updateFeed(delegate: self)
         }
-        self.feedTableView.addSubview(self.refreshControl)
     }
-    
-    // MARK - Table view
     
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        return Gist.feed.count
+        return Feed.feed.count
     }
     
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -68,11 +72,10 @@ class ViewController: UIViewController, UITableViewDataSource, UITableViewDelega
     
     func tableView(_ tableView: UITableView, prefetchRowsAt indexPaths: [IndexPath]) {
         // Check if there is a last row between prefetched
-        if indexPaths.map({$0.row}).contains(Gist.feed.count - 1), !self.isLocked {
+        if indexPaths.map({$0.row}).contains(Feed.feed.count - 1), !self.isLocked {
             self.isLocked = true
-            print("is locked: \(self.isLocked)")
-            DispatchQueue(label: "Load more").async {
-                Gist.loadMore(delegate: self)
+            DispatchQueue(label: "loadMore").async {
+                Feed.loadMore(delegate: self)
                 sleep(2)
                 self.isLocked = false
             }
@@ -93,7 +96,21 @@ class ViewController: UIViewController, UITableViewDataSource, UITableViewDelega
     // MARK - stuff
     
     func getGistFromFeed(at index: Int) -> Gist {
-        return Gist.feed[index]
+        return Feed.feed[index]
     }
+    
+    // MARK - things to delegate things to GistVC
+    
+    override func prepare(for segue: UIStoryboardSegue, sender: Any?) {
+        if let gistVC = segue.destination as? GistViewController {
+            gistVC.gist = (sender as! Gist)
+        }
+    }
+    
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        self.performSegue(withIdentifier: "ShowGist", sender: self.getGistFromFeed(at: indexPath.row))
+    }
+    
 }
 

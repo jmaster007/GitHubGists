@@ -9,25 +9,31 @@
 import Foundation
 import Alamofire
 
-// MARK - делаем класс
-
-protocol GistDelegate {
-    func finishUpdating(updateTableView: Bool)
-    func refreshCell(_ row: Int)
-}
-
 class Gist {
-    var gistID: String?
-    var gistURL: String?
-    var gistDescription: String?
+    var gistID: String
+    var gistURL: String
+    var gistDescription: String
     var owner: Owner
-    var delegate: GistDelegate?
+    var delegate: FeedDelegate?
+    var content: String?
+    var files: [File]?
+    var commits: [Commit]?
     
     struct Owner {
         let login: String?
         let id: Int?
         let avatarURL: String?
         var avatarImage: UIImage?
+    }
+    
+    struct File {
+        let filename: String?
+        let content: String?
+    }
+    
+    struct Commit {
+        let id: String?
+        let changes: NSAttributedString?
     }
     
     init(gistID: String, gistURL: String, gistDescription: String, owner: Owner) {
@@ -37,118 +43,95 @@ class Gist {
         self.owner = owner
     }
     
-    static var feed: [Gist] = []
-    static var page: Int = 1
-    
-    // Load /more for add at the bootm of TableView
-    static func loadMore(delegate: GistDelegate) {
-        let request = "https://api.github.com/gists/public?page=\(self.page)"
-        print("Requesting to load more")
-        self.requestData(request: request, delegate: delegate, isStickDown: true)
-    }
-    
-    // Remove all and update /feed
-    static func updateFeed(delegate: GistDelegate) {
-        self.page = 1
-        print("Requesting to update feed")
-        let request = "https://api.github.com/gists/public"
-        requestData(request: request, delegate: delegate, isStickDown: false)
+    // Loading lacking info, like files, its names and requesting commits
+    func loadGistContent(delegate: FeedDelegate) {
+        print("Getting info for gistID: \(self.gistID)")
+        if !Feed.checkInternetConnection() { return }
         
+        Alamofire.request("https://api.github.com/gists/\(self.gistID)").responseJSON { (response) in
+            guard let json = response.result.value as? [String: Any] else {
+                print("Malformed data received at fetching gist info: \(String(describing: response.result.value))")
+                return
+            }
+            
+            // Launching proccess of loading commints while parcing files data
+            guard let commitsURL = json["commits_url"] as? String else {
+                print("Cannot get commits_url from json")
+                return
+            }
+            DispatchQueue(label: "loadCommits").async {
+                self.loadCommits(url: commitsURL, delegate: delegate)
+            }
+            
+            // Parcing files data
+            
+            guard let files = json["files"] as? [String: [String: Any]] else {
+                print("Malformed data on trying get gist files: \(json)")
+                return
+            }
+        
+            var tempFiles = [File]()
+            for file in files {
+                let fileName = file.value["filename"] as? String
+                let content = file.value["content"] as? String
+                tempFiles.append(File(filename: fileName, content: content))
+            }
+            self.files = tempFiles
+            
+            print("Getting info for gistID: \(self.gistID) was successful")
+            delegate.finishUpdating(updateTableView: true)
+        }
     }
     
-    static private func requestData(request: String, delegate: GistDelegate, isStickDown: Bool) {
-        if !NetworkReachabilityManager()!.isReachable {
-            print("No internet connection while fetching data")
-            return
-        }
-        // Trying to request a data
-        print("Requesting a data: \(request)")
-        Alamofire.request(request).responseJSON { (response) -> Void in
-            print("Current page: \(self.page)")
-            
-            guard response.result.isSuccess else {
-                print("Error occured while fetching gists: \(String(describing: response.result.error))")
+    // Loading commits
+    func loadCommits(url: String, delegate: FeedDelegate) {
+        print("Getting commits for gistID: \(self.gistID)")
+        if !Feed.checkInternetConnection() { return }
+        
+        Alamofire.request(url).responseJSON { (response) in
+            guard let commits = response.result.value as? [[String: Any]] else {
+                print("Malformed data received at fetching commits: \(response.result.value!))")
                 return
             }
             
-            //Checking if response have right format
-            guard let loadedData = response.result.value as? [[String: AnyObject]] else {
-                print("Malformed data received from gists service: \(String(describing: response.result.value))")
-                return
-            }
-            
-            var feed = [Gist]()
-            
-            // Parcing data from JSON
-            for var gistDict in loadedData {
-                guard let owner = gistDict["owner"] as? [String: AnyObject] else {
-                    print("Malford data while trying get owner info: \(gistDict)")
+            // Preparing array of commits
+            var tempCommits = [Commit]()
+            for commit in commits {
+                guard let status = commit["change_status"] as? [String: Any] else {
+                    print("Malformed data received at unpacking change_status: \(commit))")
                     return
                 }
                 
-                feed.append(Gist(
-                    gistID: gistDict["id"] as! String,
-                    gistURL: gistDict["url"] as! String,
-                    gistDescription: (gistDict["description"] is NSNull ? "" : gistDict["description"] as! String),
-                    owner: Gist.Owner(
-                        login: owner["login"] as? String,
-                        id: owner["id"] as? Int,
-                        avatarURL: owner["avatar_url"] as? String,
-                        avatarImage: nil
-                )))
+                // Configuring changes as attributed string to show deletions/addition using colors
+                let additions = ((status["additions"] as? Int)?.description)!
+                let deletions = ((status["deletions"] as? Int)?.description)!
+                let changes = self.makeAttributedStringForChanges(additions: additions, deletions: deletions)
+
+                tempCommits.append(Commit(id: commit["version"] as? String, changes: changes))
             }
-            
-            // Checking if loaded data isn't the same we have
-            if Gist.feed.first?.gistID == feed.first?.gistID {
-                print("Nothing new loaded...")
-                delegate.finishUpdating(updateTableView: false)
-                return
-            }
-            
-            // If downloaded different pack of gists...
-            print("Have new items...")
-            
-            // startsAt is for images to load only new pack
-            var startsAt: Int
-            
-            // /more or /feed
-            if isStickDown {
-                var newFeed = [Gist]()
-                newFeed.append(contentsOf: self.feed)
-                newFeed.append(contentsOf: feed)
-                startsAt = self.feed.count - 1
-                self.feed = newFeed
-            } else {
-                self.feed = feed
-                startsAt = 0
-            }
+            self.commits = tempCommits
+            print("Getting commits for gistID: \(self.gistID) was successful")
             delegate.finishUpdating(updateTableView: true)
-            
-            // downloading images for new pack
-            print("Downloading images...")
-            DispatchQueue(label: "downloading images").async{
-                for index in startsAt...(self.feed.count - 1) {
-                    self.loadImage(forRow: index, delegate: delegate)
-                }
-            }
-            self.page += 1
         }
     }
     
-    static func loadImage(forRow row: Int, delegate: GistDelegate) {
-        if self.feed[row].owner.avatarImage == nil, let url = self.feed[row].owner.avatarURL {
-            self.feed[row].owner.avatarImage = UIImage()
-            print("Will load image using url \(url)")
-            Alamofire.request(url).responseData { (response) in
-                if let imageData = response.result.value, let image = UIImage(data: imageData) {
-                    
-                    self.feed[row].owner.avatarImage = image
-                    delegate.refreshCell(row)
-                } else {
-                    self.feed[row].owner.avatarImage = nil
-                    
-                }
-            }
+    // MARK - stuff
+    
+    // Making an attributed string to show deletions/addition on different colors
+    func makeAttributedStringForChanges(additions: String, deletions: String) -> NSAttributedString? {
+        let html = """
+        <html>
+        <body>
+        <span style="color: green;font-family: Helvetica Neue">\(additions)</span>
+        <span style="color: black;font-family: Helvetica Neue"> / </span>
+        <span style="color: red;font-family: Helvetica Neue">\(deletions)</span>
+        </body>
+        </html>
+        """
+        let data = Data(html.utf8)
+        if let attributedString = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.html], documentAttributes: nil) {
+            return attributedString
         }
+        return nil
     }
 }
